@@ -466,7 +466,14 @@ function renderMarkdown(src, link, slugCache) {
   const ids = new Set();
   let excerpt = null;
   let i = 0;
+  // Word count fused into this walk: every line index is consumed exactly
+  // once (i only advances, one i++ per line), and '\n' resets wordCount's
+  // inWord state, so summing wordCount(line) over lines equals
+  // wordCount(src). `counted` flushes lines consumed by the previous block.
+  let words = 0;
+  let counted = 0;
   while (i < n) {
+    while (counted < i) words += wordCount(lines[counted++]);
     const line = lines[i];
     if (lineIsBlank(line)) {
       i++;
@@ -549,7 +556,8 @@ function renderMarkdown(src, link, slugCache) {
     if (excerpt === null) excerpt = html;
     out.push(`<p>${html}</p>\n`);
   }
-  return { html: out.join(''), toc, excerpt: excerpt ?? '' };
+  while (counted < n) words += wordCount(lines[counted++]);
+  return { html: out.join(''), toc, excerpt: excerpt ?? '', words };
 }
 
 // ---------------------------------------------------------------- Templates
@@ -705,9 +713,9 @@ function emitCode(nodes, out) {
       out.push('}');
     } else if (n.kind === 'for') {
       const nm = JSON.stringify(n.name);
-      out.push(`{const _xs=${pathExpression(n.path)};if(Array.isArray(_xs)){for(let _i=0;_i<_xs.length;_i++){const _xv=_xs[_i];const _hn=Object.hasOwn(S,${nm});const _on=S[${nm}];const _hl=Object.hasOwn(S,"loop");const _ol=S.loop;S[${nm}]=_xv;S.loop={index:_i+1,first:_i===0,last:_i===_xs.length-1,length:_xs.length};`);
+      out.push(`{const _xs=${pathExpression(n.path)};if(Array.isArray(_xs)){const _hn=Object.hasOwn(S,${nm});const _on=S[${nm}];const _hl=Object.hasOwn(S,"loop");const _ol=S.loop;const _lo={index:0,first:false,last:false,length:_xs.length};S.loop=_lo;for(let _i=0;_i<_xs.length;_i++){S[${nm}]=_xs[_i];_lo.index=_i+1;_lo.first=_i===0;_lo.last=_i===_xs.length-1;`);
       emitCode(n.body, out);
-      out.push(`if(_hl)S.loop=_ol;else delete S.loop;if(_hn)S[${nm}]=_on;else delete S[${nm}];}}}`);
+      out.push(`}if(_hl)S.loop=_ol;else delete S.loop;if(_hn)S[${nm}]=_on;else delete S[${nm}];}}`);
     } else if (n.kind === 'include') {
       out.push(`{if(depth<8){const _f=F[${JSON.stringify(n.name)}];if(_f)_f(out,S,depth+1);}}`);
     }
@@ -743,19 +751,23 @@ function renderNodesSlow(nodes, out, S, depth, F) {
       case 'for': {
         const xs = scopeLookup(S, n.path);
         if (!Array.isArray(xs)) break;
+        const hn = Object.hasOwn(S, n.name);
+        const on = S[n.name];
+        const hl = Object.hasOwn(S, 'loop');
+        const ol = S.loop;
+        const lo = { index: 0, first: false, last: false, length: xs.length };
+        S.loop = lo;
         for (let k = 0; k < xs.length; k++) {
-          const hn = Object.hasOwn(S, n.name);
-          const on = S[n.name];
-          const hl = Object.hasOwn(S, 'loop');
-          const ol = S.loop;
           S[n.name] = xs[k];
-          S.loop = { index: k + 1, first: k === 0, last: k === xs.length - 1, length: xs.length };
+          lo.index = k + 1;
+          lo.first = k === 0;
+          lo.last = k === xs.length - 1;
           renderNodesSlow(n.body, out, S, depth, F);
-          if (hl) S.loop = ol;
-          else delete S.loop;
-          if (hn) S[n.name] = on;
-          else delete S[n.name];
         }
+        if (hl) S.loop = ol;
+        else delete S.loop;
+        if (hn) S[n.name] = on;
+        else delete S[n.name];
         break;
       }
       case 'include': {
@@ -898,7 +910,7 @@ export function run(input) {
     s.html = md.html;
     s.toc = md.toc;
     s.excerpt = md.excerpt;
-    s.reading = Math.max(1, Math.ceil(wordCount(s.body) / 200));
+    s.reading = Math.max(1, Math.ceil(md.words / 200));
   }
 
   const posts = kept.filter((s) => s.post);
